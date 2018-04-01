@@ -6,40 +6,6 @@ import (
 	"net"
 )
 
-type Attribute uint16
-
-// STUN Required Attributes
-const (
-	AttribMappedAddress     Attribute = 0x0001
-	AttribUsername          Attribute = 0x0006
-	AttribMessageIntegrity  Attribute = 0x0008
-	AttribErrorCode         Attribute = 0x0009
-	AttribUnknownAttributes Attribute = 0x000A
-	AttribRealm             Attribute = 0x0014
-	AttribNonce             Attribute = 0x0015
-	AttribXORMappedAddress  Attribute = 0x0020
-)
-
-// STUN Optional Attributes
-const (
-	AttribSoftware        Attribute = 0x8022
-	AttribAlternateServer Attribute = 0x8023
-	AttribFingerprint     Attribute = 0x8028
-)
-
-// TURN Expanded Attributes
-const (
-	AttribChannelNumber      Attribute = 0x000C // CHANNEL-NUMBER
-	AttribLifetime           Attribute = 0x000D // LIFETIME
-	AttribXORPeerAddress     Attribute = 0x0012 // XOR-PEER-ADDRESS
-	AttribData               Attribute = 0x0013 // DATA
-	AttribXORRelayedAddress  Attribute = 0x0016 // XOR-RELAYED-ADDRESS
-	AttribEvenPort           Attribute = 0x0018 // EVEN-PORT
-	AttribRequestedTransport Attribute = 0x0019 // REQUESTED-TRANSPORT
-	AttribDontFragment       Attribute = 0x001A // DONT-FRAGMENT
-	AttribReservationToken   Attribute = 0x0022 // RESERVATION-TOKEN
-)
-
 type AttributeValidator func(attribs []*RawAttribute) bool
 
 // Attribute TLV
@@ -50,26 +16,29 @@ type RawAttribute struct {
 }
 
 func (r *RawAttribute) AsRequestedTransport() (byte, bool) {
-	if r != nil && r.Value[0] == 17 {
-		return 17, true
+	if r != nil && len(r.Value) >= 1 {
+		return r.Value[0], true
 	}
 	return 0, false
 }
 
-func (r *RawAttribute) AsChannelNumber() uint16 {
+func (r *RawAttribute) AsChannelNumber() (uint16, bool) {
 	if r != nil {
-		return be.Uint16(r.Value)
+		return be.Uint16(r.Value), true
 	}
-	return 0
+	return 0, false
 }
 
 func (r *RawAttribute) AsXorMappedAddress(transactionID []byte) (*net.UDPAddr, bool) {
+	if r == nil {
+		return nil, false
+	}
 	ipFamily := be.Uint16(r.Value[0:2])
 	if ipFamily != IPv4Flag { //&& ipFamily != IPv6Flag {
 		return nil, false
 	}
 
-	addr := &net.UDPAddr{IP: make([]byte, 16)}
+	addr := &net.UDPAddr{IP: make([]byte, net.IPv6len)}
 	addr.Port = int(be.Uint16(r.Value[2:4])) ^ (MagicCookie >> 16)
 
 	xorBytes(addr.IP, r.Value[4:], transactionID)
@@ -94,7 +63,8 @@ func ParseAttributes(data []byte) []*RawAttribute {
 		paddedLen := getPadding(int(attrib.Length))
 		attrib.Value = make([]byte, paddedLen)
 		if n, err := buf.Read(attrib.Value); err != nil {
-			log.Debugf("attribute value read failed, expected len %v, read %v, error: %v", attrib.Length, n, err)
+			log.Debugf("attribute value read failed, expected len %v, read %v, type: %v error: %v",
+				attrib.Length, n, attrib.Type, err)
 			return ra
 		}
 		//trim padding
@@ -120,6 +90,34 @@ func WriteRequestedTransport(buf *bytes.Buffer, tranport byte) {
 	buf.WriteByte(0)
 	buf.WriteByte(0)
 	buf.WriteByte(0)
+}
+
+func WriteChannelNumber(buf *bytes.Buffer, ch uint16) {
+	binary.Write(buf, be, uint16(AttribChannelNumber))
+	binary.Write(buf, be, uint16(2))
+	binary.Write(buf, be, ch)
+	buf.WriteByte(0)
+	buf.WriteByte(0)
+}
+
+func WriteXorMappedAddress(buf *bytes.Buffer, addr *net.UDPAddr, transactionID []byte) {
+	var (
+		family = IPv4Flag
+		ip     = addr.IP.To16()
+	)
+	if isIPv4(addr.IP) {
+		ip = ip[12:16] // like in ip.To4()
+	} else {
+		family = IPv6Flag
+	}
+
+	value := make([]byte, net.IPv6len)
+	binary.BigEndian.PutUint16(value[0:2], family)
+	binary.BigEndian.PutUint16(value[2:4], uint16(addr.Port^MagicCookie>>16))
+	xorBytes(value[4:4+len(ip)], ip, transactionID)
+	binary.Write(buf, be, uint16(AttribXORMappedAddress))
+	binary.Write(buf, be, uint16(net.IPv6len))
+	buf.Write(value)
 }
 
 func WriteErrorAttribute(buf *bytes.Buffer, code int) {

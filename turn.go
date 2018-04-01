@@ -9,6 +9,10 @@ import (
 	"time"
 )
 
+var (
+	be = binary.BigEndian
+)
+
 type TurnOption func(*TurnService) error
 
 func WithMagicCookie(m uint32) TurnOption {
@@ -160,6 +164,12 @@ Listen:
 		case ChannelBindRequest:
 			log.Infoln("channelbind request")
 			s.channelBind(n, addr, buf)
+		case SendIndication:
+			log.Infoln("send indication")
+			s.send(n, addr, buf)
+		case CreatePermissionRequest:
+			log.Infoln("create permission request")
+			s.createPermission(n, addr, buf)
 		default:
 			log.Infoln("method not implemented:", sMethod)
 		}
@@ -212,7 +222,14 @@ func (s *TurnService) allocate(n int, addr *net.UDPAddr, buf []byte) {
 		m := NewStunMessage()
 		attribs := ParseAttributes(buf[HeaderLength:n])
 		if trp, ok := GetAttribute(AttribRequestedTransport, attribs).AsRequestedTransport(); !ok {
-			log.Debugf("stun attribute requested-transport failed got %v parse status %v", trp, ok)
+			log.Debugf("stun attribute requested-transport missing status")
+			m.Set(AllocateErrorResponse, transID)
+			WriteErrorAttribute(m.Buffer, StatusBadRequest)
+			mBytes := m.Bytes()
+			s.conn.WriteToUDP(mBytes, addr)
+			return
+		} else if trp != UDPTransport {
+			log.Debugf("stun attribute requested-transport incorrect expected %v got %v", UDPTransport, trp)
 			m.Set(AllocateErrorResponse, transID)
 			WriteErrorAttribute(m.Buffer, StatusUnsupportedTransportProtocol)
 			mBytes := m.Bytes()
@@ -295,6 +312,7 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 	s.mu.Lock()
 	_, found := s.allocMap[connKey]
 	if !found {
+		log.Infoln("unallocated address peer")
 		s.mu.Unlock()
 		return
 	}
@@ -309,20 +327,46 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 		}
 		m := NewStunMessage()
 		attribs := ParseAttributes(buf[HeaderLength:n])
-		ch := GetAttribute(AttribChannelNumber, attribs).AsChannelNumber()
-		xAddr, ok := GetAttribute(AttribXORMappedAddress, attribs).AsXorMappedAddress(transID)
-		if !ok || !isIPv4(addr.IP) {
-			log.Debugln("ipv6 not supported")
-			m.Set(AllocateErrorResponse, transID)
+
+		ch, ok := GetAttribute(AttribChannelNumber, attribs).AsChannelNumber()
+		if !ok {
+			log.Infoln("channel attribute missing")
+			m.Set(ChannelBindErrorResponse, transID)
 			WriteErrorAttribute(m.Buffer, StatusBadRequest)
 			s.conn.WriteToUDP(m.Bytes(), addr)
 			return
 		}
+		if ChannelDataStart&ch != ChannelDataStart && ch >= ChannelDataEnd {
+			log.Infoln("invalid channel range: ", ch)
+			m.Set(ChannelBindErrorResponse, transID)
+			WriteErrorAttribute(m.Buffer, StatusBadRequest)
+			s.conn.WriteToUDP(m.Bytes(), addr)
+			return
+		}
+
+		xAddr, ok := GetAttribute(AttribXORMappedAddress, attribs).AsXorMappedAddress(transID)
+		if !ok {
+			log.Infoln("xor-mapped-address missing")
+			m.Set(ChannelBindErrorResponse, transID)
+			WriteErrorAttribute(m.Buffer, StatusBadRequest)
+			s.conn.WriteToUDP(m.Bytes(), addr)
+			return
+		}
+		if !isIPv4(xAddr.IP) {
+			log.Infoln("ipv6 not supported")
+			m.Set(ChannelBindErrorResponse, transID)
+			WriteErrorAttribute(m.Buffer, StatusBadRequest)
+			s.conn.WriteToUDP(m.Bytes(), addr)
+			return
+		}
+		log.Infof("%v binding %v to addr %v", connKey, 0, xAddr)
+
 		if ChannelDataStart&ch == ChannelDataStart && ch <= ChannelDataEnd {
 			s.mu.Lock()
 			channel, found := s.chanMap[ch]
 			if !found {
 				channel = &channelBind{
+					client:   connKey,
 					peerAddr: xAddr,
 					expiry:   time.Now().Add(s.channelTimeout),
 				}
@@ -343,12 +387,17 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 	}
 }
 
-func (r *TurnService) data(n int, addr *net.UDPAddr, buf []byte) {
+func (s *TurnService) createPermission(n int, addr *net.UDPAddr, buf []byte) {
+
+}
+
+func (s *TurnService) send(n int, addr *net.UDPAddr, buf []byte) {
 	//not implemented
 }
 
 func isIPv4(ip net.IP) bool {
-	return isZeros(ip[0:10]) && ip[10] == 0xff && ip[11] == 0xff // Copied from net.IP.To4
+	return len(ip) == net.IPv4len ||
+		(isZeros(ip[0:10]) && ip[10] == 0xff && ip[11] == 0xff) // Copied from net.IP.To4
 }
 
 func udpAddrToKey(addr *net.UDPAddr) (uint64, bool) {

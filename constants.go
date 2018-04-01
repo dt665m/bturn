@@ -1,9 +1,5 @@
 package bturn
 
-import (
-	"encoding/binary"
-)
-
 const (
 	MagicCookie          = 0x2112A442
 	TransactionIDLength  = 12
@@ -17,8 +13,45 @@ const (
 	UDPTransport byte   = 17
 )
 
-var (
-	be = binary.BigEndian
+type Attribute uint16
+
+// STUN Required Attributes
+const (
+	AttribMappedAddress     Attribute = 0x0001
+	AttribUsername          Attribute = 0x0006
+	AttribMessageIntegrity  Attribute = 0x0008
+	AttribErrorCode         Attribute = 0x0009
+	AttribUnknownAttributes Attribute = 0x000A
+	AttribRealm             Attribute = 0x0014
+	AttribNonce             Attribute = 0x0015
+	AttribXORMappedAddress  Attribute = 0x0020
+)
+
+// STUN Optional Attributes
+const (
+	AttribSoftware        Attribute = 0x8022
+	AttribAlternateServer Attribute = 0x8023
+	AttribFingerprint     Attribute = 0x8028
+)
+
+// TURN Expanded Attributes
+const (
+	AttribChannelNumber      Attribute = 0x000C // CHANNEL-NUMBER
+	AttribLifetime           Attribute = 0x000D // LIFETIME
+	AttribXORPeerAddress     Attribute = 0x0012 // XOR-PEER-ADDRESS
+	AttribData               Attribute = 0x0013 // DATA
+	AttribXORRelayedAddress  Attribute = 0x0016 // XOR-RELAYED-ADDRESS
+	AttribEvenPort           Attribute = 0x0018 // EVEN-PORT
+	AttribRequestedTransport Attribute = 0x0019 // REQUESTED-TRANSPORT
+	AttribDontFragment       Attribute = 0x001A // DONT-FRAGMENT
+	AttribReservationToken   Attribute = 0x0022 // RESERVATION-TOKEN
+)
+
+const (
+	ChannelDataStart         = 0x4000
+	ChannelDataEnd           = 0x7FFE
+	ChannelDataReservedStart = 0x8000
+	ChannelDataReservedEnd   = 0xFFFF
 )
 
 // errors

@@ -1,12 +1,5 @@
 package bturn
 
-const (
-	ChannelDataStart         = 0x4000
-	ChannelDataEnd           = 0x7FFE
-	ChannelDataReservedStart = 0x8000
-	ChannelDataReservedEnd   = 0xFFFF
-)
-
 // stun Methods
 const (
 	BindingRequest       = 0x0001
@@ -24,11 +17,11 @@ const (
 	RefreshResponse      = 0x0104
 	RefreshErrorResponse = 0x0114
 
-	ChannelBindRequest          = 0x0009 //(only request/response semantics defined)
-	ChannelBindingResponse      = 0x0109
-	ChannelBindingErrorResponse = 0x0119
+	ChannelBindRequest       = 0x0009 //(only request/response semantics defined)
+	ChannelBindResponse      = 0x0109
+	ChannelBindErrorResponse = 0x0119
 
-	// SendMethod             = 0x006 //(only indication semantics defined)
-	// DataMethod             = 0x007 //(only indication semantics defined)
-	// CreatePermissionMethod = 0x008 //(only request/response semantics defined)
+	SendIndication          = 0x006 //(only indication semantics defined)
+	DataIndication          = 0x007 //(only indication semantics defined)
+	CreatePermissionRequest = 0x008 //(only request/response semantics defined)
 )

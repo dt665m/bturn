@@ -15,6 +15,7 @@ type allocation struct {
 }
 
 type channelBind struct {
+	client   uint64
 	peerAddr *net.UDPAddr
 	expiry   time.Time
 
