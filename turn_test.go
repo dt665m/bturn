@@ -18,6 +18,7 @@ var (
 )
 
 func TestMain(m *testing.M) {
+	rand.Seed(time.Now().UnixNano())
 	udpAddr, err := net.ResolveUDPAddr("udp4", ":8090")
 	if err != nil {
 		panic(err)
@@ -228,7 +229,6 @@ func assertNil(t *testing.T) func(v interface{}) {
 
 //get random channel port within ChannelBind Range
 func RandChan() uint16 {
-	rand.Seed(time.Now().Unix())
 	min := int(ChannelDataStart)
 	max := int(ChannelDataEnd)
 	return uint16(rand.Intn(max-min) + min)

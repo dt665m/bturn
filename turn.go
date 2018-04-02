@@ -121,9 +121,15 @@ func New(conn *net.UDPConn, opts ...TurnOption) (*TurnService, error) {
 				for k, alloc := range s.allocMap {
 					if alloc.expiry.Sub(now) <= 0 {
 						delete(s.allocMap, k)
-						//delete channels also
 					} else {
-						log.Infof("%v expires in %v", k, alloc.expiry.Sub(now))
+						log.Infof("%v alloc expires in %v", k, alloc.expiry.Sub(now))
+					}
+				}
+				for k, chBind := range s.chanMap {
+					if chBind.expiry.Sub(now) <= 0 {
+						delete(s.chanMap, k)
+					} else {
+						log.Infof("%v chbind expires in %v", k, chBind.expiry.Sub(now))
 					}
 				}
 				s.mu.Unlock()
@@ -183,7 +189,7 @@ func (s *TurnService) tryChannelData(n int, addr *net.UDPAddr, buf []byte) bool 
 
 	ch := binary.BigEndian.Uint16(buf[:2])
 	if ChannelDataStart&ch == ChannelDataStart && ch <= ChannelDataEnd {
-		//found channel range.
+		//valid channel range.
 		chBind, found := s.chanMap[ch]
 		if found {
 			pLen := int(binary.BigEndian.Uint32(buf[4:]))
@@ -246,12 +252,14 @@ func (s *TurnService) allocate(n int, addr *net.UDPAddr, buf []byte) {
 		}
 
 		s.mu.Lock()
-		client, found := s.allocMap[connKey]
+		alloc, found := s.allocMap[connKey]
 		if !found {
-			client = &allocation{
-				expiry: time.Now().Add(10 * time.Minute),
+			alloc = &allocation{
+				connKey:    connKey,
+				reflexAddr: addr,
+				expiry:     time.Now().Add(10 * time.Minute),
 			}
-			s.allocMap[connKey] = client
+			s.allocMap[connKey] = alloc
 		}
 		s.mu.Unlock()
 
@@ -260,12 +268,12 @@ func (s *TurnService) allocate(n int, addr *net.UDPAddr, buf []byte) {
 		if err != nil {
 			log.Debugf("udp write to %v error: %v", addr, err)
 		}
-		client.rBytes += n
-		client.rDatagrams++
-		client.wBytes += nW
-		client.wDatagrams++
+		alloc.rBytes += n
+		alloc.rDatagrams++
+		alloc.wBytes += nW
+		alloc.wDatagrams++
 	} else {
-		log.Debugln("allocateMethod spam:", buf[:n], transID)
+		log.Debugln("allocateMethod spam:", buf[:n])
 	}
 }
 
@@ -280,7 +288,7 @@ func (s *TurnService) refresh(n int, addr *net.UDPAddr, buf []byte) {
 	if bytes.Equal(transID[:StunTransactionIDPtr], s.magicCookieBytes) { //check magic cookie is ok
 		m := NewStunMessage()
 		s.mu.Lock()
-		client, found := s.allocMap[connKey]
+		alloc, found := s.allocMap[connKey]
 		if !found {
 			m.Set(RefreshErrorResponse, transID)
 			WriteErrorAttribute(m.Buffer, StatusConnectionTimeoutOrFailure)
@@ -288,7 +296,7 @@ func (s *TurnService) refresh(n int, addr *net.UDPAddr, buf []byte) {
 			s.mu.Unlock()
 			return
 		}
-		client.expiry = time.Now().Add(s.allocationTimeout)
+		alloc.expiry = time.Now().Add(s.allocationTimeout)
 		s.mu.Unlock()
 
 		m.Set(RefreshResponse, transID)
@@ -296,10 +304,10 @@ func (s *TurnService) refresh(n int, addr *net.UDPAddr, buf []byte) {
 		if err != nil {
 			log.Debugf("udp write to %v error: %v", addr, err)
 		}
-		client.rBytes += n
-		client.rDatagrams++
-		client.wBytes += nW
-		client.wDatagrams++
+		alloc.rBytes += n
+		alloc.rDatagrams++
+		alloc.wBytes += nW
+		alloc.wDatagrams++
 	}
 }
 
@@ -309,14 +317,14 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 		log.Debugln("unhandled addr type:", addr)
 		return
 	}
-	s.mu.Lock()
-	_, found := s.allocMap[connKey]
+	s.mu.RLock()
+	alloc, found := s.allocMap[connKey]
 	if !found {
-		log.Infoln("unallocated address peer")
-		s.mu.Unlock()
+		log.Infoln("channelBind requested from unallocated:", addr)
+		s.mu.RUnlock()
 		return
 	}
-	s.mu.Unlock()
+	s.mu.RUnlock()
 
 	transID := buf[StunTransactionIDPtr:HeaderLength]
 	if bytes.Equal(transID[:StunTransactionIDPtr], s.magicCookieBytes) { //check magic cookie is ok
@@ -325,74 +333,93 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 			log.Debugf("stun message payload and length incorrect, expected %v got %v", sLen, len(buf[HeaderLength:]))
 			return
 		}
-		m := NewStunMessage()
-		attribs := ParseAttributes(buf[HeaderLength:n])
 
-		ch, ok := GetAttribute(AttribChannelNumber, attribs).AsChannelNumber()
+		var (
+			m       = NewStunMessage()
+			attribs = ParseAttributes(buf[HeaderLength:n])
+			ch      uint16
+			xAddr   *net.UDPAddr
+		)
+		ch, ok = GetAttribute(AttribChannelNumber, attribs).AsChannelNumber()
 		if !ok {
 			log.Infoln("channel attribute missing")
-			m.Set(ChannelBindErrorResponse, transID)
-			WriteErrorAttribute(m.Buffer, StatusBadRequest)
-			s.conn.WriteToUDP(m.Bytes(), addr)
-			return
+			goto Fail
 		}
 		if ChannelDataStart&ch != ChannelDataStart && ch >= ChannelDataEnd {
 			log.Infoln("invalid channel range: ", ch)
-			m.Set(ChannelBindErrorResponse, transID)
-			WriteErrorAttribute(m.Buffer, StatusBadRequest)
-			s.conn.WriteToUDP(m.Bytes(), addr)
-			return
+			goto Fail
 		}
 
-		xAddr, ok := GetAttribute(AttribXORMappedAddress, attribs).AsXorMappedAddress(transID)
+		xAddr, ok = GetAttribute(AttribXORMappedAddress, attribs).AsXorMappedAddress(transID)
 		if !ok {
 			log.Infoln("xor-mapped-address missing")
-			m.Set(ChannelBindErrorResponse, transID)
-			WriteErrorAttribute(m.Buffer, StatusBadRequest)
-			s.conn.WriteToUDP(m.Bytes(), addr)
-			return
+			goto Fail
 		}
 		if !isIPv4(xAddr.IP) {
 			log.Infoln("ipv6 not supported")
-			m.Set(ChannelBindErrorResponse, transID)
-			WriteErrorAttribute(m.Buffer, StatusBadRequest)
-			s.conn.WriteToUDP(m.Bytes(), addr)
-			return
+			goto Fail
 		}
-		log.Infof("%v binding %v to addr %v", connKey, 0, xAddr)
 
 		if ChannelDataStart&ch == ChannelDataStart && ch <= ChannelDataEnd {
-			s.mu.Lock()
+			s.mu.RLock()
 			channel, found := s.chanMap[ch]
+			s.mu.RUnlock()
 			if !found {
-				channel = &channelBind{
-					client:   connKey,
-					peerAddr: xAddr,
-					expiry:   time.Now().Add(s.channelTimeout),
+				s.mu.Lock()
+				s.chanMap[ch] = &channelBind{
+					allocation: alloc,
+					peerAddr:   xAddr,
+					expiry:     time.Now().Add(s.channelTimeout),
 				}
-				s.chanMap[ch] = channel
-				log.Debugf("Channel %v mapped to %v for %v", ch, xAddr, addr)
+				s.mu.Unlock()
+				log.Debugf("Channel %v mapped %v to peer %v", ch, addr, xAddr)
+				goto Success
+			} else if channel.allocation.connKey == connKey {
+				channel.expiry = time.Now().Add(s.channelTimeout)
+				channel.peerAddr = xAddr
+				log.Debugf("Channel %v mapped %v to peer %v refreshed", ch, addr, xAddr)
+				goto Success
+			} else {
+				log.Debugf("Channel %v already mapped by another allocation", ch)
+				goto Fail
 			}
-			if channel.peerAddr == xAddr {
+		}
 
+	Success:
+		{
+			m.Set(ChannelBindResponse, transID)
+			nW, err := s.conn.WriteToUDP(m.Bytes(), addr)
+			if err != nil {
+				log.Debugf("udp write to %v error: %v", addr, err)
 			}
-			//check addr == xor-mapped-address or we are already used up, reject
-			s.mu.Unlock()
-		} else {
-			m.Set(RefreshErrorResponse, transID)
+			alloc.rBytes += n
+			alloc.rDatagrams++
+			alloc.wBytes += nW
+			alloc.wDatagrams++
+		}
+
+	Fail:
+		{
+			m.Set(ChannelBindErrorResponse, transID)
 			WriteErrorAttribute(m.Buffer, StatusBadRequest)
-			s.conn.WriteToUDP(m.Bytes(), addr)
-			return
+			nW, err := s.conn.WriteToUDP(m.Bytes(), addr)
+			if err != nil {
+				log.Debugf("udp write to %v error: %v", addr, err)
+			}
+			alloc.rBytes += n
+			alloc.rDatagrams++
+			alloc.wBytes += nW
+			alloc.wDatagrams++
 		}
 	}
 }
 
 func (s *TurnService) createPermission(n int, addr *net.UDPAddr, buf []byte) {
-
+	log.Debugln("send method not implemented")
 }
 
 func (s *TurnService) send(n int, addr *net.UDPAddr, buf []byte) {
-	//not implemented
+	log.Debugln("send method not implemented")
 }
 
 func isIPv4(ip net.IP) bool {

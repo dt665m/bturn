@@ -6,6 +6,7 @@ import (
 )
 
 type allocation struct {
+	connKey    uint64
 	reflexAddr *net.UDPAddr
 	expiry     time.Time
 
@@ -15,9 +16,9 @@ type allocation struct {
 }
 
 type channelBind struct {
-	client   uint64
-	peerAddr *net.UDPAddr
-	expiry   time.Time
+	allocation *allocation
+	peerAddr   *net.UDPAddr
+	expiry     time.Time
 
 	//tracking
 	wBytes, rBytes         int
