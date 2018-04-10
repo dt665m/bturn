@@ -176,15 +176,16 @@ func TestChannelBind(t *testing.T) {
 		assertNil(err)
 
 		resp := make([]byte, 1500)
-		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 		_, err := conn.Read(resp)
 		assertNil(err)
 		if binary.BigEndian.Uint16(resp[:2]) != AllocateResponse {
 			t.Errorf("allocate response incorrect, expected %v, got %v", AllocateResponse, binary.BigEndian.Uint16(resp[:2]))
 		}
+		myCh := RandChan()
 		req = makeRequest(ChannelBindRequest)
 		WriteXorMappedAddress(req, otherAddr, FullTransactionID)
-		WriteChannelNumber(req, RandChan())
+		WriteChannelNumber(req, myCh)
 		reqBuf = req.Bytes()
 		binary.BigEndian.PutUint16(reqBuf[2:4], uint16(len(reqBuf[HeaderLength:])))
 		t.Log("STUN Request", reqBuf)
@@ -201,7 +202,24 @@ func TestChannelBind(t *testing.T) {
 		assertNil(err)
 		if binary.BigEndian.Uint16(resp[:2]) != ChannelBindResponse {
 			t.Errorf("channelbind response incorrect, expected %v, got %v", ChannelBindResponse, binary.BigEndian.Uint16(resp[:2]))
+			return
 		}
+
+		//send relay message
+		data := bytes.NewBuffer(make([]byte, 0, 512))
+		binary.Write(data, be, myCh)
+		binary.Write(data, be, uint16(2))
+		binary.Write(data, be, uint16(myCh))
+		b := data.Bytes()
+		_, err = conn.Write(b)
+		assertNil(err)
+
+		//see if we get the first relayed message
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := conn.Read(resp)
+		assertNil(err)
+		fmt.Printf("%v received from %v\n", myCh, binary.BigEndian.Uint16(resp[:n]))
+
 	}
 	go connHandler(connA, connB.LocalAddr().(*net.UDPAddr))
 	go connHandler(connB, connA.LocalAddr().(*net.UDPAddr))

@@ -192,13 +192,13 @@ func (s *TurnService) tryChannelData(n int, addr *net.UDPAddr, buf []byte) bool 
 		//valid channel range.
 		chBind, found := s.chanMap[ch]
 		if found {
-			pLen := int(binary.BigEndian.Uint32(buf[4:]))
-			if len(buf[8:]) < pLen {
+			pLen := int(binary.BigEndian.Uint16(buf[2:]))
+			if len(buf[4:n]) < pLen {
 				log.Debugf("channel data length %v too large %v", pLen, buf)
 				return true
 			}
-			chBind.expiry = time.Now().Add(10 * time.Minute)
-			wN, err := s.conn.WriteToUDP(buf[8:pLen], chBind.peerAddr)
+			chBind.expiry = time.Now().Add(s.channelTimeout)
+			wN, err := s.conn.WriteToUDP(buf[4:n], chBind.peerAddr)
 			if err != nil {
 				log.Debugf("udp write to %v error: %v", addr, err)
 			}
@@ -207,6 +207,7 @@ func (s *TurnService) tryChannelData(n int, addr *net.UDPAddr, buf []byte) bool 
 			chBind.wDatagrams++
 			chBind.wBytes += wN
 		}
+		return true
 	}
 	return false
 }
@@ -287,19 +288,18 @@ func (s *TurnService) refresh(n int, addr *net.UDPAddr, buf []byte) {
 	transID := buf[StunTransactionIDPtr:HeaderLength]
 	if bytes.Equal(transID[:StunTransactionIDPtr], s.magicCookieBytes) { //check magic cookie is ok
 		m := NewStunMessage()
-		s.mu.Lock()
+		s.mu.RLock()
 		alloc, found := s.allocMap[connKey]
+		s.mu.RUnlock()
 		if !found {
 			m.Set(RefreshErrorResponse, transID)
 			WriteErrorAttribute(m.Buffer, StatusConnectionTimeoutOrFailure)
 			s.conn.WriteToUDP(m.Bytes(), addr)
-			s.mu.Unlock()
 			return
 		}
 		alloc.expiry = time.Now().Add(s.allocationTimeout)
-		s.mu.Unlock()
-
 		m.Set(RefreshResponse, transID)
+
 		nW, err := s.conn.WriteToUDP(m.Bytes(), addr)
 		if err != nil {
 			log.Debugf("udp write to %v error: %v", addr, err)
@@ -356,7 +356,7 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 			goto Fail
 		}
 		if !isIPv4(xAddr.IP) {
-			log.Infoln("ipv6 not supported")
+			log.Infoln("ipv6 not yet supported")
 			goto Fail
 		}
 
@@ -372,15 +372,15 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 					expiry:     time.Now().Add(s.channelTimeout),
 				}
 				s.mu.Unlock()
-				log.Debugf("Channel %v mapped %v to peer %v", ch, addr, xAddr)
+				log.Debugf("ch %v mapped by %v to peer %v", ch, addr, xAddr)
 				goto Success
 			} else if channel.allocation.connKey == connKey {
 				channel.expiry = time.Now().Add(s.channelTimeout)
 				channel.peerAddr = xAddr
-				log.Debugf("Channel %v mapped %v to peer %v refreshed", ch, addr, xAddr)
+				log.Debugf("ch %v mapped %v to peer %v refreshed", ch, addr, xAddr)
 				goto Success
 			} else {
-				log.Debugf("Channel %v already mapped by another allocation", ch)
+				log.Debugf("ch %v already mapped by another allocation", ch)
 				goto Fail
 			}
 		}
@@ -396,6 +396,7 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 			alloc.rDatagrams++
 			alloc.wBytes += nW
 			alloc.wDatagrams++
+			return
 		}
 
 	Fail:
@@ -410,6 +411,7 @@ func (s *TurnService) channelBind(n int, addr *net.UDPAddr, buf []byte) {
 			alloc.rDatagrams++
 			alloc.wBytes += nW
 			alloc.wDatagrams++
+			return
 		}
 	}
 }
