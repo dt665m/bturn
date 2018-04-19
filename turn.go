@@ -101,7 +101,7 @@ func New(conn *net.UDPConn, opts ...TurnOption) (*TurnService, error) {
 		allocCheck:        func(attribs []*RawAttribute) bool { return true },
 		quitCh:            make(chan struct{}),
 	}
-	//use stun magicCookie first
+	//use default stun magicCookie first
 	binary.BigEndian.PutUint32(s.magicCookieBytes, MagicCookie)
 	for _, opt := range opts {
 		if err := opt(s); err != nil {
